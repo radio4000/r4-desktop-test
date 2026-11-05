@@ -2,11 +2,17 @@
 //! mpv lives on its own thread: the window sends commands and reads the latest state, so it never waits on mpv.
 use libmpv2::Mpv;
 use libmpv2::events::Event;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 /// How often the thread looks at mpv when no command arrives; the seek bar moves at this pace.
 const POLL: Duration = Duration::from_millis(200);
+/// How many upcoming tracks get their stream looked up before they play.
+const PRELOAD: usize = 2;
+/// A looked-up stream goes back to its page this long before YouTube stops serving it, or after an hour if it doesn't say.
+const EXPIRY_MARGIN: Duration = Duration::from_secs(10 * 60);
+const UNDATED: Duration = Duration::from_secs(60 * 60);
 
 /// An mpv whose warnings come as events for [`log_event`], so they land in the log file rather than only the terminal.
 pub fn mpv(extra: &[(&str, &str)]) -> libmpv2::Result<Mpv> {
@@ -129,6 +135,15 @@ impl Player {
         extra: &'static [(&'static str, &'static str)],
         changed: impl Fn() + Send + 'static,
     ) -> Self {
+        Self::spawn_with(extra, crate::playback_tools::stream_url, changed)
+    }
+
+    /// As [`Player::spawn`], looking up streams with `resolve`.
+    fn spawn_with(
+        extra: &'static [(&'static str, &'static str)],
+        resolve: fn(&str) -> Option<String>,
+        changed: impl Fn() + Send + 'static,
+    ) -> Self {
         let (tx, commands) = mpsc::channel();
         let (states, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -146,11 +161,22 @@ impl Player {
                     return;
                 }
             };
+            let (found_tx, found) = mpsc::channel();
             let mut engine = Engine {
                 mpv,
                 titles: Vec::new(),
+                pages: Vec::new(),
                 order: Vec::new(),
                 state: State::default(),
+                preload: Preload {
+                    resolve,
+                    playlist: 0,
+                    tried: HashSet::new(),
+                    streams: HashMap::new(),
+                    looking: 0,
+                    found_tx,
+                    found,
+                },
             };
             loop {
                 match commands.recv_timeout(POLL) {
@@ -162,6 +188,7 @@ impl Player {
                 while let Some(event) = engine.mpv.wait_event(0.0) {
                     log_event(&engine.mpv, &event);
                 }
+                engine.preload();
                 if engine.look() {
                     send(&engine.state);
                 }
@@ -192,7 +219,25 @@ struct Engine {
     titles: Vec<String>,
     /// The channel's track at each place in mpv's playlist.
     order: Vec<usize>,
+    /// Each channel track's page URL, for mpv to look up again when its stream expires.
+    pages: Vec<String>,
     state: State,
+    preload: Preload,
+}
+
+/// Streams looked up ahead of play, swapped into mpv's playlist in place of their pages.
+struct Preload {
+    resolve: fn(&str) -> Option<String>,
+    /// Counts loaded playlists, so a lookup that finishes after the channel changed is dropped.
+    playlist: u64,
+    /// Playlist places already looked up or being looked up, so each is tried once.
+    tried: HashSet<usize>,
+    /// Playlist places that now hold a stream, until the stream stops working.
+    streams: HashMap<usize, Instant>,
+    /// Lookups still running, stale ones included, so quick channel changes never pile up yt-dlps.
+    looking: usize,
+    found_tx: mpsc::Sender<(u64, usize, Option<String>)>,
+    found: mpsc::Receiver<(u64, usize, Option<String>)>,
 }
 
 impl Engine {
@@ -210,6 +255,9 @@ impl Engine {
                 if self.state.queue.as_deref() != Some(&queue) || self.state.filter != filter {
                     let _ = mpv.command("playlist-clear", &[]);
                     let _ = mpv.command("stop", &[]);
+                    self.preload.playlist += 1;
+                    self.preload.tried.clear();
+                    self.preload.streams.clear();
                     let first = pool.iter().position(|&i| i == index).unwrap_or(0);
                     self.order = shuffle(pool.len(), first, random())
                         .into_iter()
@@ -219,7 +267,8 @@ impl Engine {
                     for &i in &self.order {
                         let _ = mpv.command("loadfile", &[&tracks[i].url, "append"]);
                     }
-                    self.titles = tracks.into_iter().map(|t| t.title).collect();
+                    (self.pages, self.titles) =
+                        tracks.into_iter().map(|t| (t.url, t.title)).unzip();
                     self.state.queue = Some(queue);
                     self.state.filter = filter;
                     self.state.channel = channel;
@@ -261,6 +310,62 @@ impl Engine {
         }
     }
 
+    /// Looks up the streams of the next [`PRELOAD`] tracks in playlist order, and swaps in each one found.
+    /// A stream about to expire goes back to its page, to be looked up again if it's still coming up.
+    fn preload(&mut self) {
+        let Some(current) = self
+            .mpv
+            .get_property::<i64>("playlist-pos")
+            .ok()
+            .and_then(|i| usize::try_from(i).ok())
+        else {
+            return;
+        };
+        let p = &mut self.preload;
+        while let Ok((playlist, at, stream)) = p.found.try_recv() {
+            p.looking -= 1;
+            // The playing track already went to mpv's own lookup; swapping it would restart it.
+            if playlist != p.playlist || at == current {
+                continue;
+            }
+            if let Some(stream) = stream {
+                let title = self.order.get(at).and_then(|&i| self.titles.get(i));
+                log::debug!("preloaded {}", title.map_or("", String::as_str));
+                replace(&self.mpv, at, &stream, title.map(String::as_str));
+                p.streams
+                    .insert(at, Instant::now() + lasts(&stream, SystemTime::now()));
+            }
+        }
+        let now = Instant::now();
+        let expired: Vec<usize> = p
+            .streams
+            .iter()
+            .filter(|&(&at, &until)| at != current && until <= now)
+            .map(|(&at, _)| at)
+            .collect();
+        for at in expired {
+            p.streams.remove(&at);
+            p.tried.remove(&at);
+            if let Some(page) = self.order.get(at).and_then(|&i| self.pages.get(i)) {
+                replace(&self.mpv, at, page, None);
+            }
+        }
+        for at in current + 1..(current + 1 + PRELOAD).min(self.order.len()) {
+            if p.looking >= PRELOAD {
+                break;
+            }
+            if !p.tried.insert(at) {
+                continue;
+            }
+            let page = self.pages[self.order[at]].clone();
+            let (resolve, playlist, found) = (p.resolve, p.playlist, p.found_tx.clone());
+            p.looking += 1;
+            std::thread::spawn(move || {
+                let _ = found.send((playlist, at, resolve(&page)));
+            });
+        }
+    }
+
     /// Reads mpv into the state; true if anything changed.
     fn look(&mut self) -> bool {
         let mpv = &self.mpv;
@@ -289,6 +394,34 @@ impl Engine {
             .unwrap_or(false);
         *s != before
     }
+}
+
+/// Puts `url` at playlist place `at` in place of what's there, titled for mpv's log.
+fn replace(mpv: &Mpv, at: usize, url: &str, title: Option<&str>) {
+    // Byte-length quoting keeps commas in a title from splitting the options.
+    let options = title
+        .map(|t| format!("force-media-title=%{}%{t}", t.len()))
+        .unwrap_or_default();
+    if mpv
+        .command("loadfile", &[url, "insert-at", &at.to_string(), &options])
+        .is_ok()
+    {
+        let _ = mpv.command("playlist-remove", &[&(at + 1).to_string()]);
+    }
+}
+
+/// How long a stream URL can stay in the playlist: until shortly before YouTube's `expire=` stamp, or an hour without one.
+fn lasts(url: &str, now: SystemTime) -> Duration {
+    url.split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("expire="))
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        .map(|at| {
+            at.duration_since(now)
+                .unwrap_or_default()
+                .saturating_sub(EXPIRY_MARGIN)
+        })
+        .unwrap_or(UNDATED)
 }
 
 /// A different number on every call, enough to shuffle by.
@@ -354,6 +487,20 @@ mod tests {
         }
         assert_eq!(pick(1, Some(0), 9), 0);
         assert_eq!(pick(0, None, 9), 0);
+    }
+
+    #[test]
+    fn streams_go_back_before_youtube_expires_them() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let url =
+            |expire: u64| format!("https://r1.googlevideo.com/videoplayback?expire={expire}&ei=x");
+        assert_eq!(
+            lasts(&url(1_000_000 + 6 * 3600), now),
+            Duration::from_secs(6 * 3600) - EXPIRY_MARGIN
+        );
+        assert_eq!(lasts(&url(1_000_000 + 60), now), Duration::ZERO);
+        assert_eq!(lasts(&url(10), now), Duration::ZERO);
+        assert_eq!(lasts("https://example.com/a.mp3", now), UNDATED);
     }
 
     /// One second of silent 8 kHz mono WAV.
@@ -464,6 +611,66 @@ mod tests {
         }
         assert_eq!(p.state.filter.as_deref(), Some("#dub"));
         assert_eq!(p.state.station(), "C · #dub");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Pages named `page-<n>` that only the stand-in lookup can turn into files.
+    fn stand_in(page: &str) -> Option<String> {
+        let n = page.strip_prefix("page-")?;
+        (n != "dead").then(|| {
+            let dir = std::env::temp_dir().join(format!("r4-preload-{}", std::process::id()));
+            dir.join(format!("{n}.wav")).to_str().unwrap().to_string()
+        })
+    }
+
+    #[test]
+    fn plays_upcoming_tracks_from_their_looked_up_streams() {
+        let dir = std::env::temp_dir().join(format!("r4-preload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.wav");
+        silence(&first);
+        let mut tracks = vec![Track {
+            url: first.to_str().unwrap().to_string(),
+            title: "first".into(),
+        }];
+        for n in ["1", "2", "dead", "3"] {
+            if n != "dead" {
+                silence(&dir.join(format!("{n}.wav")));
+            }
+            tracks.push(Track {
+                url: format!("page-{n}"),
+                title: format!("t{n}"),
+            });
+        }
+        // Hold each track at its end, so only Next moves on.
+        let mut p = Player::spawn_with(&[("ao", "null"), ("keep-open", "always")], stand_in, || {});
+        // The shuffle leads with the first track; mpv can't open the pages after it, so they only play if looked up ahead.
+        p.send(Command::Play {
+            queue: "c".into(),
+            filter: None,
+            channel: "C".into(),
+            tracks,
+            pool: (0..5).collect(),
+            index: 0,
+        });
+        let mut heard = vec![];
+        let start = std::time::Instant::now();
+        while heard.len() < 4 {
+            assert!(start.elapsed().as_secs() < 20, "only heard {heard:?}");
+            std::thread::sleep(Duration::from_millis(50));
+            p.update();
+            if let (Some(i), Some(_)) = (p.state.index, p.state.dur)
+                && heard.last() != Some(&i)
+            {
+                heard.push(i);
+                // Give the lookups for what's next a moment, as a playing track would.
+                std::thread::sleep(Duration::from_millis(500));
+                p.send(Command::Next);
+            }
+        }
+        heard.sort();
+        // Track 3 is the dead page: never looked up, so mpv fails it and moves on.
+        assert_eq!(heard, vec![0, 1, 2, 4]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

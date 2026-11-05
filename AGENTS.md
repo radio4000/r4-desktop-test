@@ -32,3 +32,5 @@ Several checkouts test at once on Oskar's desktop, and a second copy of the app 
 ## Dependencies
 
 Bumping crates: egui/eframe/egui_extras and zbus must stay on the versions the pinned fastframe tag uses (a second copy of egui breaks its types), so check the tag's Cargo.toml before taking those majors. `cargo-edit` isn't installed; use `cargo info <crate>` to see the latest version. The hetzner box has no display, so the window can't launch there: `--version` and `--check-playback` are the local smoke test, CI does the rest.
+
+Player tests that step with Next need `keep-open=always`: `yes` only holds the last track, so short test files run on by themselves. Right after a skip mpv still reports the old track's `duration` and `time-pos` for a moment, so time a skip by the new track's position starting near zero.

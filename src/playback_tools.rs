@@ -24,6 +24,40 @@ pub fn configure(init: &libmpv2::MpvInitializer) -> libmpv2::Result<()> {
     set_path(init, ytdlp)
 }
 
+/// The audio stream behind a track's page, as mpv's yt-dlp hook would pick it, so mpv can open it without the wait.
+/// `None` when yt-dlp can't say, and mpv then looks the page up itself.
+pub fn stream_url(page: &str) -> Option<String> {
+    let ytdlp = YTDLP_PATH
+        .get()
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| executable("yt-dlp").into());
+    let mut command = std::process::Command::new(ytdlp);
+    command.args([
+        "--no-js-runtimes",
+        "--no-playlist",
+        "--format",
+        "bestaudio/best",
+        "--get-url",
+        "--",
+        page,
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: a console app would otherwise flash a window from the windowed app.
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.stderr(std::process::Stdio::null()).output().ok()?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let mut lines = stdout.lines();
+    // Two lines would be separate video and audio, which one URL can't carry.
+    match (output.status.success(), lines.next(), lines.next()) {
+        (true, Some(url), None) if url.starts_with("http") => Some(url.to_string()),
+        _ => None,
+    }
+}
+
 fn set_path(init: &libmpv2::MpvInitializer, ytdlp: &Path) -> libmpv2::Result<()> {
     // mpv key/value options support byte-length quoting, including commas in home folders.
     let path = ytdlp.to_string_lossy();
