@@ -7,27 +7,27 @@ edition = "2024"
 libmpv2 = { version = "6.0.0", default-features = false }
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "wayland", "x11", "links"] }
 egui = "0.36.2"
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = "3"
 egui_extras = { version = "0.36.2", features = ["svg", "http", "image"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0", version = "0.14.0" }
-fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-dirs = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
+fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1", version = "0.16.1" }
+fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-dirs = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
 log = "0.4"
 # mpv_request_log_messages, which libmpv2 doesn't wrap.
 libmpv2-sys = "4.0.1"
-fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-file = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
-sha2 = "0.10"
+fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-file = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.16.1" }
+sha2 = "0.11"
 nucleo-matcher = "0.3"
 
 

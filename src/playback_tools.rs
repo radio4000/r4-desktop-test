@@ -95,6 +95,11 @@ fn fetch(dir: &Path, ytdlp: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Lowercase hex, as `sha256sum` prints it.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Checks `body` against `name`'s line in a sha256sum-style listing.
 fn verify(body: &[u8], sums: &[u8], name: &str) -> Result<(), Box<dyn Error>> {
     let sums = String::from_utf8_lossy(sums);
@@ -105,7 +110,7 @@ fn verify(body: &[u8], sums: &[u8], name: &str) -> Result<(), Box<dyn Error>> {
             (file.trim_start().trim_start_matches('*') == name).then_some(hash)
         })
         .ok_or_else(|| format!("{name} is not in its checksums"))?;
-    if format!("{:x}", Sha256::digest(body)) != expected.to_ascii_lowercase() {
+    if hex(&Sha256::digest(body)) != expected.to_ascii_lowercase() {
         return Err(format!("{name} does not match its checksum").into());
     }
     Ok(())
@@ -168,7 +173,7 @@ mod tests {
 
     #[test]
     fn downloads_must_match_their_listed_checksum() {
-        let hash = format!("{:x}", Sha256::digest(b"good"));
+        let hash = hex(&Sha256::digest(b"good"));
         let sums = format!("{}  yt-dlp\n{hash}  yt-dlp_linux\n", "0".repeat(64));
         assert!(verify(b"good", sums.as_bytes(), "yt-dlp_linux").is_ok());
         assert!(verify(b"bad", sums.as_bytes(), "yt-dlp_linux").is_err());
